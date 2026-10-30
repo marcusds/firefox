@@ -10,6 +10,7 @@
 #include <VideoToolbox/VideoToolbox.h>    // For VTDecompressionSessionRef
 
 #include "AppleDecoderModule.h"
+#include "H265.h"
 #include "PerformanceRecorder.h"
 #include "PlatformDecoderModule.h"
 #include "ReorderQueue.h"
@@ -148,6 +149,8 @@ class AppleVTDecoder final : public MediaDataDecoder,
   // Set on reader/decode thread calling Flush() to indicate that output is
   // not required and so input samples on mTaskQueue need not be processed.
   Atomic<bool> mIsFlushing;
+  // HEVC only, accessed on mTaskQueue.
+  H265RaslSkipper mRaslSkipper;
   std::atomic<ProfilerThreadId> mCallbackThreadId;
   Monitor mMonitor;
   ReorderQueue mReorderQueue MOZ_GUARDED_BY(mMonitor);

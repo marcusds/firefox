@@ -1966,6 +1966,68 @@ Result<bool, nsresult> H265::IsRandomAccessPoint(
       aSample, [](const H265NALU& aNalu) { return aNalu.IsIRAP(); });
 }
 
+bool H265RaslSkipper::ShouldSkip(const mozilla::MediaRawData* aSample) {
+  bool hasPicture = false;
+  bool isIRAP = false;
+  bool isBLA = false;
+  bool isRASL = false;
+  bool endOfSequence = false;
+  AutoTArray<Span<const uint8_t>, 3> parameterSets;
+  auto result = SampleContainsNalu(aSample, [&](const H265NALU& aNalu) {
+    // All the VCL NALUs of a picture have the same type (spec 7.4.2.2).
+    if (aNalu.IsVCL() && !hasPicture) {
+      hasPicture = true;
+      isIRAP = aNalu.IsIRAP();
+      isBLA = aNalu.IsBLA();
+      isRASL = aNalu.IsRASL();
+    }
+    endOfSequence |= aNalu.IsEndOfSequence();
+    if (aNalu.IsVPS() || aNalu.IsSPS() || aNalu.IsPPS()) {
+      parameterSets.AppendElement(aNalu.mNALU);
+    }
+    return false;
+  });
+  if (result.isErr()) {
+    return false;
+  }
+
+  bool skip = false;
+  if (hasPicture) {
+    if (isIRAP) {
+      mNoRaslOutput = mStartsDecoding || isBLA;
+      mStartsDecoding = false;
+    } else {
+      skip = mNoRaslOutput && isRASL;
+    }
+  }
+  if (endOfSequence) {
+    mStartsDecoding = true;
+  }
+  if (skip && !parameterSets.IsEmpty()) {
+    const auto nalLenSize = HVCCConfig::Parse(aSample).unwrap().NALUSize();
+    for (const auto& nalu : parameterSets) {
+      for (int shift = 8 * (nalLenSize - 1); shift >= 0; shift -= 8) {
+        mKeptParameterSets.AppendElement(
+            static_cast<uint8_t>(nalu.Length() >> shift));
+      }
+      mKeptParameterSets.AppendElements(nalu);
+    }
+  }
+  return skip;
+}
+
+bool H265RaslSkipper::PrependKeptParameterSets(mozilla::MediaRawData* aSample) {
+  if (mKeptParameterSets.IsEmpty()) {
+    return true;
+  }
+  if (!aSample->CreateWriter()->Prepend(mKeptParameterSets.Elements(),
+                                        mKeptParameterSets.Length())) {
+    return false;
+  }
+  mKeptParameterSets.Clear();
+  return true;
+}
+
 #undef LOG
 #undef LOGV
 

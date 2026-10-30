@@ -549,15 +549,7 @@ MP4TrackDemuxer::GetNextSample(bool* aKeyframeFlagWasWrong) {
             break;
         }
       } else if (mType == kHEVC && !sample->mCrypto.IsEncrypted()) {
-#ifdef MOZ_APPLEMEDIA
-        // VideoToolbox can return a bad data error if a CRA frame is the first
-        // sample after a seek. Only IDR_W_RADL/IDR_N_LP are safe starting
-        // points.
-        auto isKeyframe = H265::IsKeyFrame(sample);
-#else
-        // On non-Apple platforms, the other RAP types are acceptable.
         auto isKeyframe = H265::IsRandomAccessPoint(sample);
-#endif
         bool keyframe = isKeyframe.isOk() && isKeyframe.unwrap();
         if (sample->mKeyframe != keyframe) {
           NS_WARNING(nsPrintfCString(

@@ -120,6 +120,23 @@ class H265NALU final {
            mNalUnitType <= NAL_TYPES::CRA_NUT;
   }
 
+  bool IsVCL() const { return mNalUnitType <= NAL_TYPES::RSV_VCL31; }
+
+  bool IsBLA() const {
+    return mNalUnitType >= NAL_TYPES::BLA_W_LP &&
+           mNalUnitType <= NAL_TYPES::BLA_N_LP;
+  }
+
+  bool IsRASL() const {
+    return mNalUnitType == NAL_TYPES::RASL_N ||
+           mNalUnitType == NAL_TYPES::RASL_R;
+  }
+
+  bool IsEndOfSequence() const {
+    return mNalUnitType == NAL_TYPES::EOS_NUT ||
+           mNalUnitType == NAL_TYPES::EOB_NUT;
+  }
+
   bool IsSPS() const { return mNalUnitType == NAL_TYPES::SPS_NUT; }
   bool IsVPS() const { return mNalUnitType == NAL_TYPES::VPS_NUT; }
   bool IsPPS() const { return mNalUnitType == NAL_TYPES::PPS_NUT; }
@@ -493,6 +510,31 @@ class H265 final {
       int aMaxNumSubLayersMinus1);
   static Result<Ok, nsresult> ParseAndIgnoreSubLayerHrdParameters(
       BitReader& aReader, int aCpbCnt, bool aSubPicHrdParamsPresentFlag);
+};
+
+// Tells which RASL pictures are not output and may not be decodable (spec
+// 8.1.3): those that follow an IRAP picture the decoding started from, or a
+// BLA picture.
+class H265RaslSkipper final {
+ public:
+  // Must be called once per sample, in decoding order. The parameter sets of a
+  // skipped sample are kept, as later pictures may refer to them.
+  bool ShouldSkip(const mozilla::MediaRawData* aSample);
+
+  // Prepends the parameter sets kept from skipped samples to aSample.
+  [[nodiscard]] bool PrependKeptParameterSets(mozilla::MediaRawData* aSample);
+
+  // Must be called when decoding restarts, for example after a flush.
+  void Reset() {
+    mStartsDecoding = true;
+    mNoRaslOutput = false;
+    mKeptParameterSets.Clear();
+  }
+
+ private:
+  bool mStartsDecoding = true;
+  bool mNoRaslOutput = false;
+  nsTArray<uint8_t> mKeptParameterSets;
 };
 
 }  // namespace mozilla
