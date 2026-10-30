@@ -2197,4 +2197,134 @@ TEST(H265, CompareSPSLessConfigs)
   EXPECT_TRUE(H265::CompareExtraData(extraData1, extraData2));
 }
 
+static already_AddRefed<MediaRawData> GetHVCCSampleWithNALUTypes(
+    std::initializer_list<uint8_t> aTypes) {
+  nsTArray<nsTArray<uint8_t>> naluData;
+  for (uint8_t type : aTypes) {
+    naluData.AppendElement(
+        nsTArray<uint8_t>{static_cast<uint8_t>(type << 1), 0x01, 0x00, 0x00});
+  }
+  nsTArray<Span<const uint8_t>> nalus;
+  for (const auto& data : naluData) {
+    nalus.AppendElement(Span<const uint8_t>{data.Elements(), data.Length()});
+  }
+  return GetHVCCSamples(nalus);
+}
+
+static bool ShouldSkip(H265RaslSkipper& aSkipper,
+                       std::initializer_list<uint8_t> aTypes) {
+  RefPtr<MediaRawData> sample = GetHVCCSampleWithNALUTypes(aTypes);
+  return aSkipper.ShouldSkip(sample);
+}
+
+TEST(H265, RaslSkipperDropsRaslWhenDecodingStartsOnCRA)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_N}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_R}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::RADL_R}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::TRAIL_R}));
+}
+
+TEST(H265, RaslSkipperKeepsRaslOfMidStreamCRA)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::IDR_W_RADL}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::TRAIL_R}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::RASL_N}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::RASL_R}));
+}
+
+TEST(H265, RaslSkipperRestartsAfterReset)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::IDR_N_LP}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::RASL_R}));
+  skipper.Reset();
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_R}));
+}
+
+TEST(H265, RaslSkipperDropsRaslOfBLA)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::IDR_W_RADL}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::BLA_W_LP}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_N}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::TRAIL_R}));
+}
+
+TEST(H265, RaslSkipperStartsAgainAfterEndOfSequence)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::IDR_N_LP}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::TRAIL_R, H265NALU::EOS_NUT}));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_N}));
+}
+
+TEST(H265, RaslSkipperIgnoresNALUsAroundThePicture)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(
+      skipper, {H265NALU::VPS_NUT, H265NALU::SPS_NUT, H265NALU::PPS_NUT,
+                H265NALU::PREFIX_SEI_NUT, H265NALU::CRA_NUT}));
+  EXPECT_TRUE(
+      ShouldSkip(skipper, {H265NALU::PREFIX_SEI_NUT, H265NALU::RASL_R}));
+}
+
+TEST(H265, RaslSkipperWaitsForAnIRAPPictureWhenStarting)
+{
+  H265RaslSkipper skipper;
+  // Samples without a picture, or that can't be read, must not use up the
+  // start of decoding.
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::VPS_NUT, H265NALU::SPS_NUT}));
+  RefPtr<MediaRawData> encrypted =
+      GetHVCCSampleWithNALUTypes({H265NALU::CRA_NUT});
+  encrypted->CreateWriter()->mCrypto.mCryptoScheme = CryptoScheme::Cenc;
+  EXPECT_FALSE(skipper.ShouldSkip(encrypted));
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::RASL_N}));
+}
+
+static void ExpectSameData(const MediaRawData* aSample,
+                           std::initializer_list<uint8_t> aTypes) {
+  RefPtr<MediaRawData> expected = GetHVCCSampleWithNALUTypes(aTypes);
+  ASSERT_EQ(aSample->Size(), expected->Size());
+  EXPECT_EQ(memcmp(aSample->Data(), expected->Data(), aSample->Size()), 0);
+}
+
+TEST(H265, RaslSkipperKeepsParameterSetsOfSkippedPictures)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::PPS_NUT, H265NALU::RASL_N}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::SPS_NUT, H265NALU::RASL_N}));
+  RefPtr<MediaRawData> trail = GetHVCCSampleWithNALUTypes({H265NALU::TRAIL_R});
+  EXPECT_FALSE(skipper.ShouldSkip(trail));
+  EXPECT_TRUE(skipper.PrependKeptParameterSets(trail));
+  ExpectSameData(trail,
+                 {H265NALU::PPS_NUT, H265NALU::SPS_NUT, H265NALU::TRAIL_R});
+
+  RefPtr<MediaRawData> next = GetHVCCSampleWithNALUTypes({H265NALU::TRAIL_R});
+  EXPECT_FALSE(skipper.ShouldSkip(next));
+  EXPECT_TRUE(skipper.PrependKeptParameterSets(next));
+  ExpectSameData(next, {H265NALU::TRAIL_R});
+}
+
+TEST(H265, RaslSkipperDropsKeptParameterSetsOnReset)
+{
+  H265RaslSkipper skipper;
+  EXPECT_FALSE(ShouldSkip(skipper, {H265NALU::CRA_NUT}));
+  EXPECT_TRUE(ShouldSkip(skipper, {H265NALU::PPS_NUT, H265NALU::RASL_N}));
+  skipper.Reset();
+  RefPtr<MediaRawData> idr = GetHVCCSampleWithNALUTypes({H265NALU::IDR_N_LP});
+  EXPECT_FALSE(skipper.ShouldSkip(idr));
+  EXPECT_TRUE(skipper.PrependKeptParameterSets(idr));
+  ExpectSameData(idr, {H265NALU::IDR_N_LP});
+}
+
 }  // namespace mozilla

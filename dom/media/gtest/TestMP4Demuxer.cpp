@@ -638,17 +638,13 @@ TEST(MP4Demuxer, GetNextKeyframe)
 //     -c:v libx265 -x265-params keyint=30:min-keyint=30:open-gop=1:info=0
 //     -an test_hevc_open_gop.mp4
 // Sample 1 is IDR_N_LP; samples 28, 60, 88 are CRA_NUT.
-// H265::IsKeyFrame() returns true only for IDR_W_RADL/IDR_N_LP, not CRA.
 TEST(MP4Demuxer, SeekHEVC)
 {
   RefPtr<MP4DemuxerBinding> binding =
       new MP4DemuxerBinding("test_hevc_open_gop.mp4");
 
-  // Seek past the first GOP. The nearest stss sync sample is a CRA_NUT.
-  // VideoToolbox can return a bad data error when a CRA is the first sample
-  // fed to a fresh decode session, analogous to non-IDR I-frames for H.264.
-  // The demuxer must only mark IDR frames as keyframes on macOS.
-  // On other platforms the seek should resolve to a CRA_NUT sample.
+  // Seek past the first GOP. The nearest stss sync sample is a CRA_NUT, which
+  // is a valid random access point.
   const TimeUnit seekTime = TimeUnit::FromSeconds(2.0);
 
   binding->RunTestAndWait([binding, seekTime]() {
@@ -660,25 +656,17 @@ TEST(MP4Demuxer, SeekHEVC)
           EXPECT_LE(aActualTime, seekTime);
           binding->mVideoTrack->GetSamples()->Then(
               binding->mTaskQueue, __func__,
-              [binding,
+              [binding, seekTime,
                aActualTime](RefPtr<MediaTrackDemuxer::SamplesHolder> aSamples) {
                 EXPECT_GT(aSamples->GetSamples().Length(), 0u);
                 RefPtr<MediaRawData> first = aSamples->GetSamples()[0];
                 EXPECT_TRUE(first->mKeyframe);
                 EXPECT_EQ(first->mTime, aActualTime);
-
+                EXPECT_EQ(aActualTime, seekTime);
                 auto isIDR = H265::IsKeyFrame(first);
-                EXPECT_TRUE(isIDR.isOk());
-#ifdef MOZ_APPLEMEDIA
-                // CRA keyframe flags are stripped on Apple platforms, so the
-                // seek falls back to the preceding IDR.
-                EXPECT_TRUE(isIDR.unwrap());
-#else
-                // On other platforms it should not resolve to the first IDR.
-                EXPECT_FALSE(isIDR.unwrap());
+                EXPECT_TRUE(isIDR.isOk() && !isIDR.unwrap());
                 auto isRAP = H265::IsRandomAccessPoint(first);
                 EXPECT_TRUE(isRAP.isOk() && isRAP.unwrap());
-#endif
                 binding->mTaskQueue->BeginShutdown();
               },
               [binding](const MediaResult&) {

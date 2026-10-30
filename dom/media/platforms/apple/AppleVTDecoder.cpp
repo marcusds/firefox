@@ -59,6 +59,7 @@ AppleVTDecoder::AppleVTDecoder(const VideoInfo& aConfig,
       mTaskQueue(TaskQueue::Create(
           GetMediaThreadPool(MediaThreadType::PLATFORM_DECODER),
           "AppleVTDecoder")),
+      mTaskQueueCapability(mTaskQueue),
       mMaxRefFrames(GetMaxRefFrames(
           aOptions.contains(CreateDecoderParams::Option::LowLatency))),
       mImageContainer(aImageContainer),
@@ -199,6 +200,20 @@ void AppleVTDecoder::ProcessDecode(MediaRawData* aSample) {
     return;
   }
 
+  if (mStreamType == StreamType::HEVC && mRaslSkipper.ShouldSkip(aSample)) {
+    LOG("skipping undecodable RASL frame");
+    MonitorAutoLock mon(mMonitor);
+    MaybeResolveBufferedFrames();
+    return;
+  }
+  if (mStreamType == StreamType::HEVC &&
+      !mRaslSkipper.PrependKeptParameterSets(aSample)) {
+    MonitorAutoLock mon(mMonitor);
+    mPromise.RejectIfExists(MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__),
+                            __func__);
+    return;
+  }
+
   mTrackingId.apply([&](const auto& aId) {
     MediaInfoFlag flag = MediaInfoFlag::None;
     flag |= (aSample->mKeyframe ? MediaInfoFlag::KeyFrame
@@ -333,6 +348,7 @@ RefPtr<MediaDataDecoder::FlushPromise> AppleVTDecoder::ProcessFlush() {
     mReorderQueue.Pop();
   }
   mPerformanceRecorder.Record(std::numeric_limits<int64_t>::max());
+  mRaslSkipper.Reset();
   mIsFlushing = false;
   return FlushPromise::CreateAndResolve(true, __func__);
 }

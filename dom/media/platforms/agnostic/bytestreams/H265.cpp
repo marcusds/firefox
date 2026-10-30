@@ -1966,6 +1966,88 @@ Result<bool, nsresult> H265::IsRandomAccessPoint(
       aSample, [](const H265NALU& aNalu) { return aNalu.IsIRAP(); });
 }
 
+bool H265RaslSkipper::ShouldSkip(const mozilla::MediaRawData* aSample) {
+  enum class PictureKind { None, BLA, OtherIRAP, RASL, Other };
+  PictureKind kind = PictureKind::None;
+  bool endOfSequence = false;
+  AutoTArray<H265NALU, 3> parameterSets;
+  auto result = SampleContainsNalu(aSample, [&](const H265NALU& aNalu) {
+    // All the VCL NALUs of a picture have the same type (spec 7.4.2.2).
+    if (kind == PictureKind::None && aNalu.IsVCL()) {
+      kind = aNalu.IsBLA()    ? PictureKind::BLA
+             : aNalu.IsIRAP() ? PictureKind::OtherIRAP
+             : aNalu.IsRASL() ? PictureKind::RASL
+                              : PictureKind::Other;
+    }
+    endOfSequence |= aNalu.IsEndOfSequence();
+    if (aNalu.IsVPS() || aNalu.IsSPS() || aNalu.IsPPS()) {
+      parameterSets.AppendElement(aNalu);
+    }
+    return false;
+  });
+  if (result.isErr()) {
+    return false;
+  }
+
+  bool skip = false;
+  switch (kind) {
+    case PictureKind::BLA:
+    case PictureKind::OtherIRAP:
+      mNoRaslOutput = mStartsDecoding || kind == PictureKind::BLA;
+      LOG("{} picture, startsDecoding={}, noRaslOutput={}",
+          kind == PictureKind::BLA ? "BLA" : "IRAP", mStartsDecoding,
+          mNoRaslOutput);
+      mStartsDecoding = false;
+      break;
+    case PictureKind::RASL:
+      skip = mNoRaslOutput;
+      break;
+    case PictureKind::None:
+    case PictureKind::Other:
+      break;
+  }
+  if (endOfSequence) {
+    LOG("End of sequence, decoding starts again from the next IRAP picture");
+    mStartsDecoding = true;
+  }
+  if (skip && !parameterSets.IsEmpty()) {
+    const auto nalLenSize = HVCCConfig::Parse(aSample).unwrap().NALUSize();
+    for (const auto& nalu : parameterSets) {
+      LOG("Keeping parameter set NALU type={} of skipped RASL picture",
+          nalu.mNalUnitType);
+      for (int shift = 8 * (nalLenSize - 1); shift >= 0; shift -= 8) {
+        mKeptParameterSets.AppendElement(
+            static_cast<uint8_t>(nalu.mNALU.Length() >> shift));
+      }
+      mKeptParameterSets.AppendElements(nalu.mNALU);
+    }
+  }
+  return skip;
+}
+
+void H265RaslSkipper::Reset() {
+  LOG("Reset, dropping {} bytes of kept parameter sets",
+      mKeptParameterSets.Length());
+  mStartsDecoding = true;
+  mNoRaslOutput = false;
+  mKeptParameterSets.Clear();
+}
+
+bool H265RaslSkipper::PrependKeptParameterSets(mozilla::MediaRawData* aSample) {
+  if (mKeptParameterSets.IsEmpty()) {
+    return true;
+  }
+  if (!aSample->CreateWriter()->Prepend(mKeptParameterSets.Elements(),
+                                        mKeptParameterSets.Length())) {
+    return false;
+  }
+  LOG("Prepended {} bytes of kept parameter sets to sample pts {}, clearing "
+      "them",
+      mKeptParameterSets.Length(), aSample->mTime.ToMicroseconds());
+  mKeptParameterSets.Clear();
+  return true;
+}
+
 #undef LOG
 #undef LOGV
 

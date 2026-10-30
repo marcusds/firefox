@@ -10,6 +10,7 @@
 #include <VideoToolbox/VideoToolbox.h>    // For VTDecompressionSessionRef
 
 #include "AppleDecoderModule.h"
+#include "H265.h"
 #include "PerformanceRecorder.h"
 #include "PlatformDecoderModule.h"
 #include "ReorderQueue.h"
@@ -17,6 +18,7 @@
 #include "apple/AppleUtils.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/DefineEnum.h"
+#include "mozilla/EventTargetCapability.h"
 #include "mozilla/ProfilerUtils.h"
 #include "mozilla/gfx/Types.h"
 
@@ -107,7 +109,9 @@ class AppleVTDecoder final : public MediaDataDecoder,
 
   void MaybeRegisterCallbackThread();
 
-  void AssertOnTaskQueue() { MOZ_ASSERT(mTaskQueue->IsCurrentThreadIn()); }
+  void AssertOnTaskQueue() const MOZ_ASSERT_CAPABILITY(mTaskQueueCapability) {
+    mTaskQueueCapability.AssertOnCurrentThread();
+  }
 
   AppleFrameRef* CreateAppleFrameRef(const MediaRawData* aSample);
   CFDictionaryRef CreateOutputConfiguration();
@@ -139,6 +143,7 @@ class AppleVTDecoder final : public MediaDataDecoder,
 
   const StreamType mStreamType;
   const RefPtr<TaskQueue> mTaskQueue;
+  EventTargetCapability<TaskQueue> mTaskQueueCapability;
   const uint32_t mMaxRefFrames;
   const RefPtr<layers::ImageContainer> mImageContainer;
   const RefPtr<layers::KnowsCompositor> mKnowsCompositor;
@@ -148,6 +153,8 @@ class AppleVTDecoder final : public MediaDataDecoder,
   // Set on reader/decode thread calling Flush() to indicate that output is
   // not required and so input samples on mTaskQueue need not be processed.
   Atomic<bool> mIsFlushing;
+  // HEVC only.
+  H265RaslSkipper mRaslSkipper MOZ_GUARDED_BY(mTaskQueueCapability);
   std::atomic<ProfilerThreadId> mCallbackThreadId;
   Monitor mMonitor;
   ReorderQueue mReorderQueue MOZ_GUARDED_BY(mMonitor);
