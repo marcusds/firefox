@@ -10,7 +10,6 @@
 #include "MockMediaResource.h"
 #include "VideoUtils.h"
 #include "WebMDemuxer.h"
-#include "gtest/gtest-spi.h"
 #include "gtest/gtest.h"
 #include "mozilla/MozPromise.h"
 #include "mozilla/SharedThreadPool.h"
@@ -94,62 +93,21 @@ TEST(MatroskaDemuxer, SeekHEVC)
       GetMediaThreadPool(MediaThreadType::SUPERVISOR), "TestWebMDemuxer");
 
   // Seek past the first GOP. The nearest sync point is a CRA_NUT.
-  // Each platform uses a different subset of the locals below: Mac records
-  // the seek outcome for EXPECT_NONFATAL_FAILURE while other platforms
-  // assert inline. Captures unused on a given platform are explicitly
-  // consumed with (void) in that platform's branch, as [[maybe_unused]]
-  // cannot be applied to lambda captures.
   const TimeUnit seekTime = TimeUnit::FromSeconds(2.0);
 
   bool ran = false;
-  // VideoToolbox can only start from IDR, so the demuxer only marks IDR
-  // frames as keyframes on macOS, mirroring MP4Demuxer. Falling back to
-  // the preceding IDR when seeking to a CRA is not implemented yet, so
-  // this seek currently fails on Mac. Record the outcome and assert it
-  // as an expected failure: once the fallback exists this will go red,
-  // at which point remove the annotation and assert the IDR fallback
-  // (see MP4Demuxer.SeekHEVC for the equivalent Apple expectations).
-  bool seekSucceeded = false;
-  bool firstKeyframe = false;
   InvokeAsync(taskQueue, __func__, [demuxer]() { return demuxer->Init(); })
       ->Then(
           taskQueue, __func__,
-          [demuxer, taskQueue, seekTime, &ran, &seekSucceeded,
-           &firstKeyframe]() {
+          [demuxer, taskQueue, seekTime, &ran]() {
             EXPECT_EQ(demuxer->GetNumberTracks(TrackInfo::kVideoTrack), 1u);
             RefPtr<MediaTrackDemuxer> videoTrack =
                 demuxer->GetTrackDemuxer(TrackInfo::kVideoTrack, 0);
             videoTrack->Seek(seekTime)->Then(
                 taskQueue, __func__,
-                [videoTrack, taskQueue, seekTime, &seekSucceeded,
-                 &firstKeyframe, &ran](TimeUnit aActualTime) {
-#ifdef MOZ_APPLEMEDIA
-                  // `seekTime` and `ran` are only asserted on other
-                  // platforms below.
-                  (void)seekTime;
-                  (void)ran;
-                  videoTrack->GetSamples()->Then(
-                      taskQueue, __func__,
-                      [taskQueue, aActualTime, &seekSucceeded, &firstKeyframe](
-                          RefPtr<MediaTrackDemuxer::SamplesHolder> aSamples) {
-                        if (!aSamples->GetSamples().IsEmpty()) {
-                          RefPtr<MediaRawData> first =
-                              aSamples->GetSamples()[0];
-                          seekSucceeded = true;
-                          firstKeyframe =
-                              first->mKeyframe && first->mTime == aActualTime;
-                        }
-                        taskQueue->BeginShutdown();
-                      },
-                      [taskQueue](const MediaResult&) {
-                        taskQueue->BeginShutdown();
-                      });
-#else
-                  // `seekSucceeded` and `firstKeyframe` are only recorded
-                  // on Mac above.
-                  (void)seekSucceeded;
-                  (void)firstKeyframe;
+                [videoTrack, taskQueue, seekTime, &ran](TimeUnit aActualTime) {
                   EXPECT_LE(aActualTime, seekTime);
+                  EXPECT_GT(aActualTime, TimeUnit::Zero());
                   videoTrack->GetSamples()->Then(
                       taskQueue, __func__,
                       [taskQueue, aActualTime, &ran](
@@ -158,6 +116,8 @@ TEST(MatroskaDemuxer, SeekHEVC)
                         RefPtr<MediaRawData> first = aSamples->GetSamples()[0];
                         EXPECT_TRUE(first->mKeyframe);
                         EXPECT_EQ(first->mTime, aActualTime);
+                        auto isRAP = H265::IsRandomAccessPoint(first);
+                        EXPECT_TRUE(isRAP.isOk() && isRAP.unwrap());
                         ran = true;
                         taskQueue->BeginShutdown();
                       },
@@ -165,12 +125,9 @@ TEST(MatroskaDemuxer, SeekHEVC)
                         EXPECT_TRUE(false) << "GetSamples failed after seek";
                         taskQueue->BeginShutdown();
                       });
-#endif
                 },
                 [taskQueue](const MediaResult&) {
-#ifndef MOZ_APPLEMEDIA
                   EXPECT_TRUE(false) << "Seek failed";
-#endif
                   taskQueue->BeginShutdown();
                 });
           },
@@ -180,14 +137,7 @@ TEST(MatroskaDemuxer, SeekHEVC)
           });
 
   taskQueue->AwaitShutdownAndIdle();
-#ifdef MOZ_APPLEMEDIA
-  EXPECT_NONFATAL_FAILURE(
-      EXPECT_TRUE(seekSucceeded && firstKeyframe)
-          << "Mac CRA seek should succeed with IDR fallback",
-      "Mac CRA seek should succeed");
-#else
   EXPECT_TRUE(ran);
-#endif
 }
 
 // Bug 2000420: ReadMetadata for AAC-in-Matroska must not scan the whole
