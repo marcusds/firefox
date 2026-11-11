@@ -247,7 +247,7 @@ export class TaskbarTabsRegistry {
       id,
       scopes: [scope],
       userContextId: aUserContextId,
-      name: manifest.name ?? generateName(aUrl),
+      name: manifest.name || manifest.short_name || generateName(aUrl),
       startUrl,
     });
     this.#taskbarTabs.push(taskbarTab);
@@ -521,7 +521,7 @@ export class TaskbarTabsRegistryStorage {
  * @returns {object} aStored exactly.
  */
 function migrateStoredTaskbarTab(aStored) {
-  if (typeof aStored.name !== "string") {
+  if (typeof aStored.name !== "string" || !aStored.name.trim()) {
     try {
       aStored.name = generateName(Services.io.newURI(aStored.startUrl));
     } catch (e) {
@@ -539,6 +539,9 @@ function migrateStoredTaskbarTab(aStored) {
  * @returns {string} A name suitable for user facing UI.
  */
 export function generateName(aUri) {
+  // The spec is never empty, unlike the host of e.g. a file: URI.
+  const fallback = aUri.host || aUri.spec;
+
   // https://www.subdomain.example.co.uk/test
 
   // ["www", "subdomain", "example", "co", "uk"]
@@ -549,9 +552,15 @@ export function generateName(aUri) {
     hostParts.shift();
   }
 
-  let suffixDomainCount = Services.eTLD
-    .getKnownPublicSuffix(aUri)
-    .split(".").length;
+  let suffixDomainCount;
+  try {
+    suffixDomainCount = Services.eTLD
+      .getKnownPublicSuffix(aUri)
+      .split(".").length;
+  } catch (e) {
+    // e.g. IP addresses don't have a public suffix.
+    return fallback;
+  }
 
   // ["subdomain", "example"]
   hostParts.splice(-suffixDomainCount);
@@ -564,5 +573,6 @@ export function generateName(aUri) {
     // "Example Subdomain"
     .join(" ");
 
-  return name;
+  // Single-label hosts like "localhost" are entirely a public suffix.
+  return name || fallback;
 }
